@@ -5,6 +5,8 @@ import {
   LlmError,
   type GenerateOptions,
   type LlmProviderInfo,
+  type LlmModelInfo,
+  type LlmResolvedModelInfo,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 
@@ -246,6 +248,27 @@ class RecoveryAdapter extends LlmAdapter {
 
   providerInfo(provider: string): LlmProviderInfo { return { id: provider, name: 'SUB2API / Antigravity Recovery' } }
 
+  async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    return this.config.targetModels.map(id => ({
+      provider,
+      id,
+      name: id,
+      description: 'Antigravity Empty Response Recovery Model',
+      inputModalities: ['text'] as any,
+    }))
+  }
+
+  async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return {
+      provider,
+      id: model,
+      name: model,
+      description: 'Antigravity Empty Response Recovery Model',
+      inputModalities: ['text'] as any,
+      context: { contextWindow: 1000000 },
+    }
+  }
+
   private resolveAgent(options: GenerateOptions): any {
     if (this.getAgent) {
       const a = this.getAgent(options)
@@ -381,6 +404,22 @@ export function apply(ctx: Context, config: Config) {
 
   const adapter = new RecoveryAdapter(ctx, config, log, getAgent)
   ctx.llm.registerAdapter(config.providers, adapter)
+
+  if (typeof (ctx.llm as any).registerConfigurableProviders === 'function') {
+    try {
+      (ctx.llm as any).registerConfigurableProviders(
+        config.providers.map(p => ({
+          provider: p,
+          displayName: 'SUB2API / Antigravity Recovery',
+          settingsNs: 'llm-pi-ai',
+          settingsPath: ['providers', p],
+          declared: false,
+        }))
+      )
+    } catch (e) {
+      log('warn', 'registerConfigurableProviders:failed', { error: String(e) })
+    }
+  }
 
   const states = new WeakMap<object, SessionState>()
 
