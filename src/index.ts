@@ -377,6 +377,56 @@ function isOurFailure(failure: any, code: string) {
   return failure?.code === code || String(failure?.message ?? '').includes(code)
 }
 
+
+async function ensureProviderCardConfigured(provider: string, config: Config, log: any) {
+  try {
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const os = await import('node:os')
+
+
+    const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
+    const settingsPath = path.join(home, 'settings.yaml')
+
+    let fileContent = ''
+    try {
+      fileContent = await fs.readFile(settingsPath, 'utf8')
+    } catch {
+      fileContent = ''
+    }
+
+    if (fileContent.includes(provider)) {
+      return
+    }
+
+    const defaultCard = `    ${provider}:
+      displayName: 反重力空响应恢复 (Antigravity Recovery)
+      api: openai-completions
+      baseURL: ${config.upstreamBaseUrl || 'http://127.0.0.1:3000/v1'}
+      apiKeyEnv: ${provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY
+      models:
+${config.targetModels.map(m => `        - id: ${m}\n          name: ${m}`).join('\n')}
+`
+
+    if (fileContent.includes('llm-pi-ai:')) {
+      if (fileContent.includes('  providers:')) {
+        fileContent = fileContent.replace('  providers:\n', '  providers:\n' + defaultCard)
+      } else {
+        fileContent = fileContent.replace('llm-pi-ai:\n', 'llm-pi-ai:\n  providers:\n' + defaultCard)
+      }
+    } else {
+      fileContent = (fileContent ? fileContent.trimEnd() + '\n\n' : '') + `llm-pi-ai:
+  providers:
+${defaultCard}`
+    }
+
+    await fs.writeFile(settingsPath, fileContent, 'utf8')
+    log('info', 'settings:provider-card-created', { provider, settingsPath })
+  } catch (err) {
+    log('warn', 'settings:provider-card-create-failed', { error: String(err) })
+  }
+}
+
 export function apply(ctx: Context, config: Config) {
   if (!config.enabled) return
   const logger = (ctx as any).logger as LoggerLike | undefined
@@ -400,6 +450,10 @@ export function apply(ctx: Context, config: Config) {
     if (typeof (ctx as any).agents?.currentInitiator === 'function') return (ctx as any).agents.currentInitiator()
     if ((ctx as any).agent) return (ctx as any).agent
     return undefined
+  }
+
+  for (const p of config.providers) {
+    ensureProviderCardConfigured(p, config, log).catch(() => {})
   }
 
   const adapter = new RecoveryAdapter(ctx, config, log, getAgent)
