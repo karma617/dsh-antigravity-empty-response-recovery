@@ -193,6 +193,56 @@ function openAIToChunks(events) {
     chunks.push({ type: 'finish', reason: { kind: hasTools ? 'tool-calls' : 'stop' } });
     return chunks;
 }
+async function resolveProviderEndpointAndKey(provider, config) {
+    let baseURL = config.upstreamBaseUrl || 'http://127.0.0.1:3000/v1';
+    let apiKey = config.apiKey || '';
+    try {
+        const fs = await import('node:fs/promises');
+        const path = await import('node:path');
+        const os = await import('node:os');
+        const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+        const settingsPath = path.join(home, 'settings.yaml');
+        const credsPath = path.join(home, '.credentials.yaml');
+        let keyEnv = '';
+        try {
+            const sText = await fs.readFile(settingsPath, 'utf8');
+            const pBlockMatch = sText.match(new RegExp('\\b' + provider + ':[\\s\\S]*?(?=\\n\\s{2,4}[\\w-]+:|$)', 'u'));
+            if (pBlockMatch) {
+                const block = pBlockMatch[0];
+                const urlMatch = block.match(/baseURL:\s*([^\r\n]+)/);
+                if (urlMatch && urlMatch[1])
+                    baseURL = urlMatch[1].trim();
+                const envMatch = block.match(/apiKeyEnv:\s*([^\r\n]+)/);
+                if (envMatch && envMatch[1])
+                    keyEnv = envMatch[1].trim();
+            }
+        }
+        catch { }
+        if (keyEnv && process.env[keyEnv]) {
+            apiKey = process.env[keyEnv];
+        }
+        else if (keyEnv) {
+            try {
+                const cText = await fs.readFile(credsPath, 'utf8');
+                const refMatch = cText.match(new RegExp('\\b' + keyEnv + ':\\s*([^\\r\\n]+)', 'u'));
+                if (refMatch && refMatch[1])
+                    apiKey = refMatch[1].trim();
+            }
+            catch { }
+        }
+        if (!apiKey) {
+            try {
+                const cText = await fs.readFile(credsPath, 'utf8');
+                const fallbackMatch = cText.match(/\b(SUB2API_[^:\r\n]+|GEMINI_API_KEY):\s*([^\r\n]+)/);
+                if (fallbackMatch && fallbackMatch[2])
+                    apiKey = fallbackMatch[2].trim();
+            }
+            catch { }
+        }
+    }
+    catch { }
+    return { baseURL, apiKey };
+}
 class RecoveryAdapter extends LlmAdapter {
     ctx;
     config;
@@ -308,10 +358,11 @@ class RecoveryAdapter extends LlmAdapter {
         const onAbort = () => controller.abort();
         options.signal?.addEventListener('abort', onAbort, { once: true });
         try {
-            const url = this.config.upstreamBaseUrl.replace(/\/$/, '') + '/chat/completions';
+            const resolved = await resolveProviderEndpointAndKey(options.provider, this.config);
+            const url = resolved.baseURL.replace(/\/$/, '') + '/chat/completions';
             const headers = { 'content-type': 'application/json', accept: 'text/event-stream' };
-            if (this.config.apiKey)
-                headers.authorization = `Bearer ${this.config.apiKey}`;
+            if (resolved.apiKey)
+                headers.authorization = `Bearer ${resolved.apiKey}`;
             const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
             const text = await response.text();
             const byteLength = new TextEncoder().encode(text).length;
