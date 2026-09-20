@@ -275,13 +275,15 @@ class RecoveryAdapter extends LlmAdapter {
       if (a) return a
     }
     if ((options as any).agent) return (options as any).agent
-    if ((this.ctx as any).agent) return (this.ctx as any).agent
-    if (typeof (this.ctx as any).agents?.currentInitiator === 'function') {
-      const a = (this.ctx as any).agents.currentInitiator()
+    const agentService = getService(this.ctx, 'agent')
+    if (agentService) return agentService
+    const agentsService = getService(this.ctx, 'agents')
+    if (typeof agentsService?.currentInitiator === 'function') {
+      const a = agentsService.currentInitiator()
       if (a) return a
     }
-    if (options.sessionId && typeof (this.ctx as any).agents?.get === 'function') {
-      return (this.ctx as any).agents.get(options.sessionId)
+    if (options.sessionId && typeof agentsService?.get === 'function') {
+      return agentsService.get(options.sessionId)
     }
     return undefined
   }
@@ -373,6 +375,14 @@ class RecoveryAdapter extends LlmAdapter {
   }
 }
 
+
+function getService(ctx: any, name: string): any {
+  if (ctx && typeof ctx.get === 'function') {
+    try { return ctx.get(name) } catch { return undefined }
+  }
+  return ctx?.[name]
+}
+
 function isOurFailure(failure: any, code: string) {
   return failure?.code === code || String(failure?.message ?? '').includes(code)
 }
@@ -433,7 +443,7 @@ async function ensureProviderCardConfigured(ctx: Context, provider: string, conf
 
 export function apply(ctx: Context, config: Config) {
   if (!config.enabled) return
-  const logger = (ctx as any).logger as LoggerLike | undefined
+  const logger = getService(ctx, 'logger') as LoggerLike | undefined
   const rank: Record<Config['logLevel'], number> = { silent: 99, error: 0, warn: 1, info: 2, debug: 3 }
   const log = (level: Config['logLevel'], message: string, data?: unknown) => {
     if (config.logLevel === 'silent' || rank[level] > rank[config.logLevel] || level === 'silent') return
@@ -450,9 +460,11 @@ export function apply(ctx: Context, config: Config) {
     if ((options as any).agent) return (options as any).agent
     const sid = String(options.sessionId ?? '')
     if (sid && sessionAgents.has(sid)) return sessionAgents.get(sid)
-    if (sid && typeof (ctx as any).agents?.get === 'function') return (ctx as any).agents.get(sid)
-    if (typeof (ctx as any).agents?.currentInitiator === 'function') return (ctx as any).agents.currentInitiator()
-    if ((ctx as any).agent) return (ctx as any).agent
+    const agentsService = getService(ctx, 'agents')
+    if (sid && typeof agentsService?.get === 'function') return agentsService.get(sid)
+    if (typeof agentsService?.currentInitiator === 'function') return agentsService.currentInitiator()
+    const agentService = getService(ctx, 'agent')
+    if (agentService) return agentService
     return undefined
   }
 
@@ -471,7 +483,7 @@ export function apply(ctx: Context, config: Config) {
           displayName: 'SUB2API / Antigravity Recovery',
           settingsNs: 'llm-pi-ai',
           settingsPath: ['providers', p],
-          declared: false,
+          declared: true,
         }))
       )
     } catch (e) {
@@ -515,7 +527,9 @@ export function apply(ctx: Context, config: Config) {
     try {
       const before = agent.session?.surface?.replaceGeneration
       log('info', 'compaction:start', { model: agent.options?.model, turn: payload.turn, step: payload.step })
-      const result = await ctx.compaction.compactIfNeeded(
+      const compactionService = getService(ctx, 'compaction')
+      if (!compactionService?.compactIfNeeded) return next()
+      const result = await compactionService.compactIfNeeded(
         { session: agent.session, options: { provider: agent.options?.provider, model: agent.options?.model } },
         'context-overflow',
         payload.signal,

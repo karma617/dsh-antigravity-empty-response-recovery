@@ -233,15 +233,17 @@ class RecoveryAdapter extends LlmAdapter {
         }
         if (options.agent)
             return options.agent;
-        if (this.ctx.agent)
-            return this.ctx.agent;
-        if (typeof this.ctx.agents?.currentInitiator === 'function') {
-            const a = this.ctx.agents.currentInitiator();
+        const agentService = getService(this.ctx, 'agent');
+        if (agentService)
+            return agentService;
+        const agentsService = getService(this.ctx, 'agents');
+        if (typeof agentsService?.currentInitiator === 'function') {
+            const a = agentsService.currentInitiator();
             if (a)
                 return a;
         }
-        if (options.sessionId && typeof this.ctx.agents?.get === 'function') {
-            return this.ctx.agents.get(options.sessionId);
+        if (options.sessionId && typeof agentsService?.get === 'function') {
+            return agentsService.get(options.sessionId);
         }
         return undefined;
     }
@@ -337,6 +339,17 @@ class RecoveryAdapter extends LlmAdapter {
         }
     }
 }
+function getService(ctx, name) {
+    if (ctx && typeof ctx.get === 'function') {
+        try {
+            return ctx.get(name);
+        }
+        catch {
+            return undefined;
+        }
+    }
+    return ctx?.[name];
+}
 function isOurFailure(failure, code) {
     return failure?.code === code || String(failure?.message ?? '').includes(code);
 }
@@ -393,7 +406,7 @@ async function ensureProviderCardConfigured(ctx, provider, config, log) {
 export function apply(ctx, config) {
     if (!config.enabled)
         return;
-    const logger = ctx.logger;
+    const logger = getService(ctx, 'logger');
     const rank = { silent: 99, error: 0, warn: 1, info: 2, debug: 3 };
     const log = (level, message, data) => {
         if (config.logLevel === 'silent' || rank[level] > rank[config.logLevel] || level === 'silent')
@@ -416,12 +429,14 @@ export function apply(ctx, config) {
         const sid = String(options.sessionId ?? '');
         if (sid && sessionAgents.has(sid))
             return sessionAgents.get(sid);
-        if (sid && typeof ctx.agents?.get === 'function')
-            return ctx.agents.get(sid);
-        if (typeof ctx.agents?.currentInitiator === 'function')
-            return ctx.agents.currentInitiator();
-        if (ctx.agent)
-            return ctx.agent;
+        const agentsService = getService(ctx, 'agents');
+        if (sid && typeof agentsService?.get === 'function')
+            return agentsService.get(sid);
+        if (typeof agentsService?.currentInitiator === 'function')
+            return agentsService.currentInitiator();
+        const agentService = getService(ctx, 'agent');
+        if (agentService)
+            return agentService;
         return undefined;
     };
     for (const p of config.providers) {
@@ -436,7 +451,7 @@ export function apply(ctx, config) {
                 displayName: 'SUB2API / Antigravity Recovery',
                 settingsNs: 'llm-pi-ai',
                 settingsPath: ['providers', p],
-                declared: false,
+                declared: true,
             })));
         }
         catch (e) {
@@ -479,7 +494,10 @@ export function apply(ctx, config) {
         try {
             const before = agent.session?.surface?.replaceGeneration;
             log('info', 'compaction:start', { model: agent.options?.model, turn: payload.turn, step: payload.step });
-            const result = await ctx.compaction.compactIfNeeded({ session: agent.session, options: { provider: agent.options?.provider, model: agent.options?.model } }, 'context-overflow', payload.signal);
+            const compactionService = getService(ctx, 'compaction');
+            if (!compactionService?.compactIfNeeded)
+                return next();
+            const result = await compactionService.compactIfNeeded({ session: agent.session, options: { provider: agent.options?.provider, model: agent.options?.model } }, 'context-overflow', payload.signal);
             const after = agent.session?.surface?.replaceGeneration;
             const progressed = result !== null || (typeof before === 'number' && typeof after === 'number' && after > before);
             log(progressed ? 'info' : 'warn', 'compaction:end', { progressed, before, after });
