@@ -1,0 +1,7 @@
+- insert:
+    - id: dsh-antigravity-empty-response-recovery
+      name: dsh-antigravity-empty-response-recovery
+      config:
+        maxEmptyRetriesBeforeCompact: 1
+        maxCompactionsPerTurn: 1
+        enabled: true
