@@ -1,4 +1,4 @@
-# DSh Antigravity Empty Response Recovery 0.3.0
+# DSh Antigravity Empty Response Recovery 0.3.1
 
 面向 DSh `0.1.6-alpha.2` 的一体化 SUB2API / Antigravity 空响应恢复插件。
 
@@ -84,6 +84,17 @@ model: gemini-3.8-flash-tiered
 - `warn`: 输出空响应、tool_choice:none、无进展压缩
 - `info`: 推荐；输出恢复阶段
 - `debug`: 额外输出 upstream HTTP 状态、响应字节数；`includeRequestBodyInDebugLog=true` 时还输出请求 body，生产环境不要开启
+
+## 测试覆盖（0.3.1）
+
+`npm test` 会先构建插件，再以 mock Cordis context 捕获通过 `apply()` 注册的真实 adapter。回归测试覆盖：
+
+- 正常响应、原请求 retry 与 `tool_choice: none`。
+- SSE text、reasoning、usage 以及分片 tool-call 参数。
+- HTTP `429`/`5xx` 透传、已取消请求、畸形 SSE。
+- compaction 触发后 synthetic fallback 的一次性消费，以及禁用 fallback 时的 `EMPTY_RESPONSE` 终态。
+
+未使用真实 SUB2API 或 Antigravity 服务进行长时间运行验证。
 
 ## 重要说明
 

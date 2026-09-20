@@ -8,6 +8,19 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    compaction: any
+    agents?: any
+    agent?: any
+  }
+  interface Events {
+    'agent/request-error': any
+    'agent/turn-stopping': any
+    'agent/disposed': any
+  }
+}
+
 export const name = 'dsh-antigravity-empty-response-recovery'
 export const inject = ['llm', 'compaction'] as const
 
@@ -224,11 +237,48 @@ function openAIToChunks(events: any[]): StreamChunk[] {
 }
 
 class RecoveryAdapter extends LlmAdapter {
-  constructor(private readonly ctx: Context, private readonly config: Config, private readonly log: (level: Config['logLevel'], message: string, data?: unknown) => void) { super() }
+  constructor(
+    private readonly ctx: Context,
+    private readonly config: Config,
+    private readonly log: (level: Config['logLevel'], message: string, data?: unknown) => void,
+    private readonly getAgent?: (options: GenerateOptions) => any,
+  ) { super() }
 
   providerInfo(provider: string): LlmProviderInfo { return { id: provider, name: 'SUB2API / Antigravity Recovery' } }
 
+  private resolveAgent(options: GenerateOptions): any {
+    if (this.getAgent) {
+      const a = this.getAgent(options)
+      if (a) return a
+    }
+    if ((options as any).agent) return (options as any).agent
+    if ((this.ctx as any).agent) return (this.ctx as any).agent
+    if (typeof (this.ctx as any).agents?.currentInitiator === 'function') {
+      const a = (this.ctx as any).agents.currentInitiator()
+      if (a) return a
+    }
+    if (options.sessionId && typeof (this.ctx as any).agents?.get === 'function') {
+      return (this.ctx as any).agents.get(options.sessionId)
+    }
+    return undefined
+  }
+
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const agent = this.resolveAgent(options)
+    const syntheticArmed = Boolean(
+      (agent as any)?.__agRecoverySynthetic || (options as any).__agRecoverySynthetic
+    )
+    if (syntheticArmed) {
+      if (agent) delete (agent as any).__agRecoverySynthetic
+      delete (options as any).__agRecoverySynthetic
+      if (this.config.syntheticFallback) {
+        this.log('warn', 'recovery:synthetic-fallback', { model: options.model, sessionId: String(options.sessionId ?? '') })
+        yield* syntheticStream(this.config.syntheticResponse)
+        return
+      }
+      throw new LlmError('Antigravity returned an empty response', EMPTY_RESPONSE)
+    }
+
     const target = modelMatches(options.model, this.config.targetModels)
     if (!target) {
       yield* this.single(options, false, 'original')
@@ -278,13 +328,14 @@ class RecoveryAdapter extends LlmAdapter {
       if (this.config.apiKey) headers.authorization = `Bearer ${this.config.apiKey}`
       const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal })
       const text = await response.text()
-      this.log('debug', 'upstream:response', { status: response.status, bytes: Buffer.byteLength(text), strategy })
+      const byteLength = new TextEncoder().encode(text).length
+      this.log('debug', 'upstream:response', { status: response.status, bytes: byteLength, strategy })
       if (!response.ok) throw new LlmError(`SUB2API HTTP ${response.status}: ${text.slice(0, 1000)}`, 'PROVIDER_HTTP_ERROR')
       const events = parseSse(text)
       const chunks = openAIToChunks(events)
       const usable = hasUsableContent(chunks)
       if (!usable) {
-        this.log('warn', 'recovery:empty', { strategy, model: options.model, bytes: Buffer.byteLength(text) })
+        this.log('warn', 'recovery:empty', { strategy, model: options.model, bytes: byteLength })
         return { ok: false, reason: 'empty' }
       }
       this.log('info', 'recovery:success', { strategy, model: options.model })
@@ -308,7 +359,7 @@ export function apply(ctx: Context, config: Config) {
   const logger = (ctx as any).logger as LoggerLike | undefined
   const rank: Record<Config['logLevel'], number> = { silent: 99, error: 0, warn: 1, info: 2, debug: 3 }
   const log = (level: Config['logLevel'], message: string, data?: unknown) => {
-    if (rank[level] > rank[config.logLevel] || level === 'silent') return
+    if (config.logLevel === 'silent' || rank[level] > rank[config.logLevel] || level === 'silent') return
     const line = `[AG-RECOVERY ${now()}] ${message}`
     const fn = logger?.[level]
     if (fn) fn.call(logger, data === undefined ? line : `${line} ${JSON.stringify(data)}`)
@@ -317,17 +368,30 @@ export function apply(ctx: Context, config: Config) {
     else console.log(line, data ?? '')
   }
 
-  const adapter = new RecoveryAdapter(ctx, config, log)
+  const sessionAgents = new Map<string, any>()
+  const getAgent = (options: GenerateOptions) => {
+    if ((options as any).agent) return (options as any).agent
+    const sid = String(options.sessionId ?? '')
+    if (sid && sessionAgents.has(sid)) return sessionAgents.get(sid)
+    if (sid && typeof (ctx as any).agents?.get === 'function') return (ctx as any).agents.get(sid)
+    if (typeof (ctx as any).agents?.currentInitiator === 'function') return (ctx as any).agents.currentInitiator()
+    if ((ctx as any).agent) return (ctx as any).agent
+    return undefined
+  }
+
+  const adapter = new RecoveryAdapter(ctx, config, log, getAgent)
   ctx.llm.registerAdapter(config.providers, adapter)
 
   const states = new WeakMap<object, SessionState>()
 
-  ctx.on('agent/request-error', async (payload, next) => {
+  ctx.on('agent/request-error', async (payload: any, next: any) => {
     if (!isOurFailure(payload.failure, COMPACTION_REQUIRED)) return next()
-    if (payload.signal.aborted) return next()
+    if (payload.signal?.aborted) return next()
     const agent = payload.agent as any
+    const sid = String(agent?.id ?? agent?.session?.id ?? '')
+    if (sid) sessionAgents.set(sid, agent)
     const previous = states.get(agent)
-    const state: SessionState = previous?.turn === payload.turn ? previous : {
+    const state: SessionState = (previous && previous.turn === payload.turn) ? previous : {
       turn: payload.turn,
       originalRetries: 0,
       toolChoiceNoneTried: true,
@@ -340,10 +404,13 @@ export function apply(ctx: Context, config: Config) {
     if (state.compactionCount >= 1) {
       if (config.syntheticFallback) {
         log('error', 'recovery:post-compaction-empty', { model: agent.options?.model, action: 'synthetic-fallback' })
-        // The failed post-compaction attempt is terminal. Arming a synthetic retry
-        // is implemented by the llm/stream listener below via this agent-scoped flag.
         ;(agent as any).__agRecoverySynthetic = true
         return { kind: 'retry' as const }
+      }
+      log('error', 'recovery:post-compaction-empty', { model: agent.options?.model, action: 'terminal-empty-response' })
+      if (payload.failure && typeof payload.failure === 'object') {
+        payload.failure.code = EMPTY_RESPONSE
+        payload.failure.message = 'Antigravity returned an empty response'
       }
       return next()
     }
@@ -370,22 +437,23 @@ export function apply(ctx: Context, config: Config) {
     }
   })
 
-  ctx.on('llm/stream', (options: any, next: any) => {
-    return (async function* () {
-      const upstream = next()
-      for await (const chunk of upstream) yield chunk
-    })()
-  })
-
   ctx.on('agent/turn-stopping', ({ agent, turn }: any) => {
+    if (agent) delete (agent as any).__agRecoverySynthetic
+    const sid = String(agent?.id ?? agent?.session?.id ?? '')
+    if (sid) sessionAgents.delete(sid)
     const state = states.get(agent)
     if (state?.turn === turn) states.delete(agent)
   })
 
-  ctx.on('agent/disposed', ({ agent }: any) => states.delete(agent))
+  ctx.on('agent/disposed', ({ agent }: any) => {
+    if (agent) delete (agent as any).__agRecoverySynthetic
+    const sid = String(agent?.id ?? agent?.session?.id ?? '')
+    if (sid) sessionAgents.delete(sid)
+    states.delete(agent)
+  })
 
   log('info', 'plugin:ready', {
-    version: '0.3.0',
+    version: '0.3.1',
     providers: config.providers,
     upstream: config.upstreamBaseUrl,
     models: config.targetModels,
@@ -393,4 +461,4 @@ export function apply(ctx: Context, config: Config) {
   })
 }
 
-export { EMPTY_RESPONSE, COMPACTION_REQUIRED, SYNTHETIC_REQUIRED }
+export { EMPTY_RESPONSE, COMPACTION_REQUIRED, SYNTHETIC_REQUIRED, RecoveryAdapter, syntheticStream }
