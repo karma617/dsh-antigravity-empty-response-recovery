@@ -174,7 +174,7 @@ function parseSse(buffer: string): any[] {
 
 function openAIToChunks(events: any[]): StreamChunk[] {
   const chunks: StreamChunk[] = []
-  const blocks = new Map<number, { type: 'text' | 'reasoning' | 'tool-call'; id?: string; name?: string; args: string }>()
+  const blocks = new Map<number, { type: 'text' | 'reasoning' | 'tool-call'; id?: string; name?: string; args: string; text?: string }>()
   let nextIndex = 0
   let usage: any
   for (const event of events) {
@@ -190,21 +190,24 @@ function openAIToChunks(events: any[]): StreamChunk[] {
       let b = [...blocks.entries()].find(([, x]) => x.type === 'text')
       if (!b) {
         const index = nextIndex++
-        blocks.set(index, { type: 'text', args: '' })
+        blocks.set(index, { type: 'text', args: '', text: '' })
         chunks.push({ type: 'block-start', index, blockType: 'text' } as StreamChunk)
         b = [index, blocks.get(index)!]
       }
-      chunks.push({ type: 'text-delta', index: b[0], text: String(delta.content) } as StreamChunk)
+      const str = String(delta.content)
+      b[1].text = (b[1].text ?? '') + str
+      chunks.push({ type: 'text-delta', index: b[0], text: str } as StreamChunk)
     }
     if (delta.reasoning_content || delta.reasoning) {
       const value = String(delta.reasoning_content ?? delta.reasoning)
       let b = [...blocks.entries()].find(([, x]) => x.type === 'reasoning')
       if (!b) {
         const index = nextIndex++
-        blocks.set(index, { type: 'reasoning', args: '' })
+        blocks.set(index, { type: 'reasoning', args: '', text: '' })
         chunks.push({ type: 'block-start', index, blockType: 'reasoning' } as StreamChunk)
         b = [index, blocks.get(index)!]
       }
+      b[1].text = (b[1].text ?? '') + value
       chunks.push({ type: 'reasoning-delta', index: b[0], text: value } as StreamChunk)
     }
     for (const tc of delta.tool_calls ?? []) {
@@ -228,8 +231,8 @@ function openAIToChunks(events: any[]): StreamChunk[] {
     }
   }
   for (const [index, b] of blocks) {
-    if (b.type === 'text') chunks.push({ type: 'block-end', index, block: { type: 'text', text: '' } } as StreamChunk)
-    else if (b.type === 'reasoning') chunks.push({ type: 'block-end', index, block: { type: 'reasoning', text: '' } } as StreamChunk)
+    if (b.type === 'text') chunks.push({ type: 'block-end', index, block: { type: 'text', text: b.text ?? '' } } as StreamChunk)
+    else if (b.type === 'reasoning') chunks.push({ type: 'block-end', index, block: { type: 'reasoning', text: b.text ?? '' } } as StreamChunk)
     else chunks.push({ type: 'block-end', index, block: { type: 'tool-call', id: b.id ?? '', name: b.name ?? '', arguments: b.args } } as StreamChunk)
   }
   if (usage) chunks.push({ type: 'usage', usage } as StreamChunk)

@@ -140,21 +140,24 @@ function openAIToChunks(events) {
             let b = [...blocks.entries()].find(([, x]) => x.type === 'text');
             if (!b) {
                 const index = nextIndex++;
-                blocks.set(index, { type: 'text', args: '' });
+                blocks.set(index, { type: 'text', args: '', text: '' });
                 chunks.push({ type: 'block-start', index, blockType: 'text' });
                 b = [index, blocks.get(index)];
             }
-            chunks.push({ type: 'text-delta', index: b[0], text: String(delta.content) });
+            const str = String(delta.content);
+            b[1].text = (b[1].text ?? '') + str;
+            chunks.push({ type: 'text-delta', index: b[0], text: str });
         }
         if (delta.reasoning_content || delta.reasoning) {
             const value = String(delta.reasoning_content ?? delta.reasoning);
             let b = [...blocks.entries()].find(([, x]) => x.type === 'reasoning');
             if (!b) {
                 const index = nextIndex++;
-                blocks.set(index, { type: 'reasoning', args: '' });
+                blocks.set(index, { type: 'reasoning', args: '', text: '' });
                 chunks.push({ type: 'block-start', index, blockType: 'reasoning' });
                 b = [index, blocks.get(index)];
             }
+            b[1].text = (b[1].text ?? '') + value;
             chunks.push({ type: 'reasoning-delta', index: b[0], text: value });
         }
         for (const tc of delta.tool_calls ?? []) {
@@ -181,9 +184,9 @@ function openAIToChunks(events) {
     }
     for (const [index, b] of blocks) {
         if (b.type === 'text')
-            chunks.push({ type: 'block-end', index, block: { type: 'text', text: '' } });
+            chunks.push({ type: 'block-end', index, block: { type: 'text', text: b.text ?? '' } });
         else if (b.type === 'reasoning')
-            chunks.push({ type: 'block-end', index, block: { type: 'reasoning', text: '' } });
+            chunks.push({ type: 'block-end', index, block: { type: 'reasoning', text: b.text ?? '' } });
         else
             chunks.push({ type: 'block-end', index, block: { type: 'tool-call', id: b.id ?? '', name: b.name ?? '', arguments: b.args } });
     }
