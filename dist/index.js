@@ -1,7 +1,7 @@
 import Schema from '@deepseek-ai/schemastery';
 import { LlmAdapter, LlmError, } from '@deepseek-ai/dsh-llm';
 export const name = 'dsh-antigravity-empty-response-recovery';
-export const inject = ['llm', 'compaction'];
+export const inject = ['llm'];
 export const Config = Schema.object({
     enabled: Schema.boolean().default(true),
     providers: Schema.array(Schema.string()).default(['sub2api-antigravity-recovery']),

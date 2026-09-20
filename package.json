@@ -1,6 +1,6 @@
 {
   "name": "dsh-antigravity-empty-response-recovery",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "All-in-one DSH 0.1.6-alpha.2 recovery adapter for Antigravity/SUB2API empty responses.",
   "type": "module",
   "main": "dist/index.js",

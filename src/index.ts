@@ -24,7 +24,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'dsh-antigravity-empty-response-recovery'
-export const inject = ['llm', 'compaction'] as const
+export const inject = ['llm'] as const
 
 export interface Config {
   enabled: boolean
