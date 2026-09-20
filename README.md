@@ -1,113 +1,92 @@
-# dsh-antigravity-empty-response-recovery
+# DSh Antigravity Empty Response Recovery 0.3.0
 
-针对 DSH + Antigravity / Gemini 代理链出现：
+面向 DSh `0.1.6-alpha.2` 的一体化 SUB2API / Antigravity 空响应恢复插件。
+
+## 目标
+
+无需 Python Proxy、无需单独进程。插件自己注册一个 DSh LLM provider adapter，直接向 SUB2API 发 OpenAI-compatible `/chat/completions` 请求，并负责完整恢复链：
+
+1. 原请求
+2. 原请求 retry
+3. `tool_choice: none`
+4. 通知 DSh `agent/request-error`
+5. `ctx.compaction.compactIfNeeded(..., 'context-overflow', ...)`
+6. DSh 从压缩后的 durable session 重新构造请求
+7. 压缩后的请求再次经过本插件
+8. 仍为空时 synthetic fallback
+
+DSH 当前官方 LLM adapter 合约要求插件继承 `LlmAdapter`、实现 `stream()` 并通过 `ctx.llm.registerAdapter()` 注册 provider；`GenerateOptions` 本身没有 `tool_choice`，所以 `tool_choice:none` 在本插件的 provider wire 层实现。详见官方文档。 
+
+## 配置
+
+```yaml
+plugins:
+  - dsh-antigravity-empty-response-recovery:
+      enabled: true
+      providers:
+        - sub2api-antigravity-recovery
+      upstreamBaseUrl: http://127.0.0.1:3000/v1
+      apiKey: ''
+      timeoutMs: 300000
+      retryOriginal: 1
+      enableToolChoiceNone: true
+      compactAfterToolChoiceNone: true
+      postCompactionRetry: 1
+      syntheticFallback: true
+      logLevel: info
+      includeRequestBodyInDebugLog: false
+```
+
+然后 DSh 路由必须使用：
+
+```yaml
+provider: sub2api-antigravity-recovery
+model: gemini-3.8-flash-tiered
+```
+
+不能把新 provider 仍然写成 `sub2api`，因为 DSh 当前一个 provider route 只能由一个 adapter 持有，重复注册会得到 `DUPLICATE_ADAPTER`。
+
+## 日志
+
+默认 `logLevel: info`。
+
+典型成功：
 
 ```text
-model "gemini-3.8-flash-tiered" returned a completed response with no content
+[AG-RECOVERY ...] plugin:ready {...}
+[AG-RECOVERY ...] request:start {...}
+[AG-RECOVERY ...] recovery:success {"strategy":"original"}
 ```
 
-的插件级恢复方案。
-
-## 设计
+典型空响应恢复：
 
 ```text
-provider stream
-      │
-      ▼
- llm/stream
-      │
-      ├─ 正常内容 → 原样通过
-      │
-      └─ finish=stop 且没有任何 content block
-                    │
-                    ▼
-              转成 EMPTY_RESPONSE
-                    │
-                    ▼
-          agent/request-error
-                    │
-          ┌─────────┴─────────┐
-          │                   │
-      普通重试一次         重试仍为空
-                              │
-                              ▼
-                    ctx.compaction.compactIfNeeded(..., 'context-overflow', ...)
-                              │
-                              ▼
-                    ctx.compaction.compactIfNeeded(..., 'context-overflow', ...)
-                              │
-                              ▼
-                   DSH 从压缩后的 durable
-                   session 重新构造请求
-                              │
-                              ▼
-                           retry
+[AG-RECOVERY ...] recovery:empty {"strategy":"original"}
+[AG-RECOVERY ...] recovery:empty {"strategy":"original-retry"}
+[AG-RECOVERY ...] recovery:tool_choice:none {...}
+[AG-RECOVERY ...] recovery:empty {"strategy":"tool-choice-none"}
+[AG-RECOVERY ...] recovery:compaction-required {...}
+[AG-RECOVERY ...] compaction:start {...}
+[AG-RECOVERY ...] compaction:end {"progressed":true,...}
+[AG-RECOVERY ...] recovery:success {"strategy":"original"}
 ```
 
-插件不修改 frozen request，也不直接操作 session 文件。
-
-## DSH 兼容性
-
-目标版本：
-
-- DSH `0.1.6-alpha.2`
-- Node `>=22.19.0`
-- `@deepseek-ai/cordis` `^4.0.1`
-- `@deepseek-ai/dsh-llm` `0.1.6-alpha.2`
-- `@deepseek-ai/dsh-compaction` `0.1.6-alpha.2`
-
-DSH `0.1.6-alpha.2` 已公开 `agent/request-error`、`llm/stream` 和 `ctx.compaction` 这些扩展点；`request-error` 返回 `{ kind: 'retry' }` 时，Agent Loop 会从 durable session 重新构造下一次请求。
-
-## 安装
-
-先关闭 DSH，然后：
-
-```powershell
-dsh plugin --profile web add .\dsh-antigravity-empty-response-recovery
-```
-
-如果插件已经打成 tgz：
-
-```powershell
-dsh plugin --profile web add .\dsh-antigravity-empty-response-recovery-0.1.0.tgz
-```
-
-然后：
-
-```powershell
-dsh --profile web --dump-config
-```
-
-确认出现：
+最终失败：
 
 ```text
-dsh-antigravity-empty-response-recovery
+[AG-RECOVERY ...] recovery:post-compaction-empty {"action":"synthetic-fallback"}
 ```
 
-最后重新启动 DSH。
+## 日志级别
 
-## 默认策略
+- `silent`: 不输出插件日志
+- `error`: 只输出恢复失败
+- `warn`: 输出空响应、tool_choice:none、无进展压缩
+- `info`: 推荐；输出恢复阶段
+- `debug`: 额外输出 upstream HTTP 状态、响应字节数；`includeRequestBodyInDebugLog=true` 时还输出请求 body，生产环境不要开启
 
-- `maxEmptyRetriesBeforeCompact = 1`
-  - 第一次检测到 EMPTY_RESPONSE：先让 DSH 再重试一次。
-  - 第二次仍 EMPTY_RESPONSE：执行一次强制 compaction。
-- `maxCompactionsPerTurn = 1`
-  - 同一 turn 最多主动压缩一次。
-- 压缩失败：不伪造模型内容，恢复原始错误。
-- 正常响应：完全不介入。
+## 重要说明
 
-## 为什么不直接调用 `compactIfNeeded`
+为了可靠判断空响应，插件会完整缓冲一次 upstream SSE，再决定是否重试。因此只有发生恢复判断的这条链路会牺牲首 token 延迟；这是为了避免已经把一个空 `finish` 转发给 DSh 后再无法改变当前 attempt。
 
-这里故意使用 `compactNow()`。
-
-`compactIfNeeded(..., 'context-overflow', ...)` 是策略型接口，而本插件是在“连续空响应已经确认”的情况下主动维护上下文，所以需要显式 compaction。
-
-`compactNow()` 会通过 `ctx.compaction.compactIfNeeded(..., 'context-overflow', ...)` 在 idle 边界安全执行，并在成功后由 Agent Loop 通过 `{ kind: 'retry' }` 重新构造请求。
-
-## 注意
-
-这个插件解决的是 DSH 侧“空响应后的恢复”。
-
-它不会修复 SUB2API / Antigravity 本身产生空响应的根因；它只是利用 DSH 官方公开的 stream、request-error 和 compaction seam 做自动恢复。
-
-如果你的请求本身已经大到“单个不可拆分的请求 envelope 就超过模型限制”，compaction 也可能无法修复，此时插件会保留原始错误。
+插件不会修改 DSh Session 文件。压缩仍由 DSh 原生 compaction seam 完成；`agent/request-error` 在压缩产生 durable surface replacement 后返回 `{ kind: 'retry' }`，由 Agent Loop 重新构造请求。
