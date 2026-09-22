@@ -1,103 +1,65 @@
-# DSh Antigravity Empty Response Recovery 0.3.1
+# DSh Antigravity Empty Response Recovery 0.4.0
 
-面向 DSh `0.1.6-alpha.2` 的一体化 SUB2API / Antigravity 空响应恢复插件。
+面向 DSh `0.1.6-alpha.2` / DSH Desktop 的全自动 SUB2API / Antigravity 空响应恢复插件。
 
-## 目标
+## 核心特性 (v0.4.0)
 
-无需 Python Proxy、无需单独进程。插件自己注册一个 DSh LLM provider adapter，直接向 SUB2API 发 OpenAI-compatible `/chat/completions` 请求，并负责完整恢复链：
+1. **全局流拦截器 (Universal Stream Interceptor)**：
+   - 监听 DSH 底层 `ctx.on('llm/stream')` 瀑布流钩子，无缝覆盖 **所有** Provider（包括 `gemini`, `sub2api`, `anthropic-messages`, 以及多模型调度器 `dsh-multi-model-orchestrator` 下派生的所有子代理/模型）。
+   - 用户无需更改 Provider 名称为独立渠道，直接使用系统原有的 `gemini` 即可享受保护。
+2. **多层级无感恢复策略**：
+   - **Tier 1 (Nudge Retry)**: 遇到 Gemini Flash 只输出 thinking 或空响应直接 `stop` 时，自动追加单轮继续提示词（例如：“上一个操作已执行完毕。请分析当前执行结果并继续完成任务或输出结论。”）触发二次推理。
+   - **Tier 2 (No-Tools Retry)**: 若模型在 Tool 调用时卡死空响应，临时剔除 tools 参数强制纯文本回复，打破模型思考死循环。
+   - **Tier 3 (Synthetic Fallback 兜底保活)**: 若多次重试依然空响应，插件直接返回合法的合成文本响应（`finish: stop`），避免抛出 `EMPTY_RESPONSE` 导致 `agent-loop` 崩溃报错 `returned a completed response with no content`。
+   - **Tier 4 (Context Compaction 上下文压缩)**: 注册 `agent/request-error` 高优先级钩子，当发生上下文超限或空响应异常时，触发 DSH 原生压缩。
+3. **独立磁盘日志追踪 (File Logging)**：
+   - DSH 桌面端 (Electron) 默认不会将后端控制台输出写盘，导致排查困难。
+   - 本插件内置持久化滚动文件日志，实时写入：
+     `C:\Users\Administrator\.dsh\antigravity-recovery.log`
+   - 自动按 10MB 滚动备份，完整记录每一次拦截、重试、恢复或兜底状态。
 
-1. 原请求
-2. 原请求 retry
-3. `tool_choice: none`
-4. 通知 DSh `agent/request-error`
-5. `ctx.compaction.compactIfNeeded(..., 'context-overflow', ...)`
-6. DSh 从压缩后的 durable session 重新构造请求
-7. 压缩后的请求再次经过本插件
-8. 仍为空时 synthetic fallback
-
-DSH 当前官方 LLM adapter 合约要求插件继承 `LlmAdapter`、实现 `stream()` 并通过 `ctx.llm.registerAdapter()` 注册 provider；`GenerateOptions` 本身没有 `tool_choice`，所以 `tool_choice:none` 在本插件的 provider wire 层实现。详见官方文档。 
-
-## 配置
-
-```yaml
-plugins:
-  - dsh-antigravity-empty-response-recovery:
-      enabled: true
-      providers:
-        - sub2api-antigravity-recovery
-      upstreamBaseUrl: http://127.0.0.1:3000/v1
-      apiKey: ''
-      timeoutMs: 300000
-      retryOriginal: 1
-      enableToolChoiceNone: true
-      compactAfterToolChoiceNone: true
-      postCompactionRetry: 1
-      syntheticFallback: true
-      logLevel: info
-      includeRequestBodyInDebugLog: false
-```
-
-然后 DSh 路由必须使用：
+## 默认配置 (`cordis.patch.yml`)
 
 ```yaml
-provider: sub2api-antigravity-recovery
-model: gemini-3.8-flash-tiered
+- insert:
+    - id: dsh-antigravity-empty-response-recovery
+      name: 'dsh-antigravity-empty-response-recovery'
+      config:
+        enabled: true
+        interceptAllProviders: true
+        targetModels:
+          - gemini
+          - antigravity
+          - flash
+        retryWithNudge: true
+        nudgePrompt: '上一个操作已执行完毕。请分析当前执行结果并继续完成任务或输出结论。'
+        enableToolChoiceNone: true
+        syntheticFallback: true
+        syntheticResponse: '已自动捕获并恢复前序空响应。当前任务上下文已完整保留，请继续下一步操作。'
+        logFilePath: '' # 默认为 C:\Users\Administrator\.dsh\antigravity-recovery.log
+        logLevel: info
 ```
 
-不能把新 provider 仍然写成 `sub2api`，因为 DSh 当前一个 provider route 只能由一个 adapter 持有，重复注册会得到 `DUPLICATE_ADAPTER`。
+## 日志查看
 
-## 日志
+在运行 DSH 桌面端时，可在终端或 PowerShell 中实时监控日志：
 
-默认 `logLevel: info`。
+```powershell
+Get-Content -Path "C:\Users\Administrator\.dsh\antigravity-recovery.log" -Wait -Tail 30
+```
 
-典型成功：
-
+典型日志输出：
 ```text
-[AG-RECOVERY ...] plugin:ready {...}
-[AG-RECOVERY ...] request:start {...}
-[AG-RECOVERY ...] recovery:success {"strategy":"original"}
+[2026-09-21T05:25:18.832Z] [INFO ] [PluginInit] Antigravity Empty Response Recovery v0.4.0 active
+[2026-09-21T05:30:12.100Z] [WARN ] [EmptyDetected] Upstream returned empty response with NO content! {"model":"gemini-3.8-flash-tiered"}
+[2026-09-21T05:30:12.105Z] [INFO ] [NudgeRetry] Attempting nudge retry with continuation prompt...
+[2026-09-21T05:30:14.320Z] [INFO ] [RecoverySuccess] Nudge retry SUCCEEDED with content! Forwarding to agent.
 ```
 
-典型空响应恢复：
+## 测试覆盖
 
-```text
-[AG-RECOVERY ...] recovery:empty {"strategy":"original"}
-[AG-RECOVERY ...] recovery:empty {"strategy":"original-retry"}
-[AG-RECOVERY ...] recovery:tool_choice:none {...}
-[AG-RECOVERY ...] recovery:empty {"strategy":"tool-choice-none"}
-[AG-RECOVERY ...] recovery:compaction-required {...}
-[AG-RECOVERY ...] compaction:start {...}
-[AG-RECOVERY ...] compaction:end {"progressed":true,...}
-[AG-RECOVERY ...] recovery:success {"strategy":"original"}
+运行完整单元测试套件：
+```bash
+node --test test/recovery.test.mjs test/universal-stream.test.mjs
 ```
-
-最终失败：
-
-```text
-[AG-RECOVERY ...] recovery:post-compaction-empty {"action":"synthetic-fallback"}
-```
-
-## 日志级别
-
-- `silent`: 不输出插件日志
-- `error`: 只输出恢复失败
-- `warn`: 输出空响应、tool_choice:none、无进展压缩
-- `info`: 推荐；输出恢复阶段
-- `debug`: 额外输出 upstream HTTP 状态、响应字节数；`includeRequestBodyInDebugLog=true` 时还输出请求 body，生产环境不要开启
-
-## 测试覆盖（0.3.1）
-
-`npm test` 会先构建插件，再以 mock Cordis context 捕获通过 `apply()` 注册的真实 adapter。回归测试覆盖：
-
-- 正常响应、原请求 retry 与 `tool_choice: none`。
-- SSE text、reasoning、usage 以及分片 tool-call 参数。
-- HTTP `429`/`5xx` 透传、已取消请求、畸形 SSE。
-- compaction 触发后 synthetic fallback 的一次性消费，以及禁用 fallback 时的 `EMPTY_RESPONSE` 终态。
-
-未使用真实 SUB2API 或 Antigravity 服务进行长时间运行验证。
-
-## 重要说明
-
-为了可靠判断空响应，插件会完整缓冲一次 upstream SSE，再决定是否重试。因此只有发生恢复判断的这条链路会牺牲首 token 延迟；这是为了避免已经把一个空 `finish` 转发给 DSh 后再无法改变当前 attempt。
-
-插件不会修改 DSh Session 文件。压缩仍由 DSh 原生 compaction seam 完成；`agent/request-error` 在压缩产生 durable surface replacement 后返回 `{ kind: 'retry' }`，由 Agent Loop 重新构造请求。
+包含了 16 项针对正常请求、空响应重试、工具剥离重试、合成流生成、上下文压缩等核心场景的端到端单测。

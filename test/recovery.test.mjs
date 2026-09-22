@@ -6,6 +6,7 @@ const config = (overrides = {}) => ({
   enabled: true, providers: ['recovery'], upstreamBaseUrl: 'http://mock/v1', apiKey: '', timeoutMs: 1000,
   retryOriginal: 1, enableToolChoiceNone: true, compactAfterToolChoiceNone: true, postCompactionRetry: 1,
   syntheticFallback: true, syntheticResponse: 'recovery fallback', targetModels: ['gemini-3.8-flash'],
+  registerStandaloneAdapter: true,
   logLevel: 'silent', includeRequestBodyInDebugLog: false, ...overrides,
 })
 

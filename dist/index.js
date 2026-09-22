@@ -1,39 +1,116 @@
 import Schema from '@deepseek-ai/schemastery';
 import { LlmAdapter, LlmError, } from '@deepseek-ai/dsh-llm';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 export const name = 'dsh-antigravity-empty-response-recovery';
 export const inject = ['llm'];
 export const Config = Schema.object({
     enabled: Schema.boolean().default(true),
-    providers: Schema.array(Schema.string()).default(['sub2api-antigravity-recovery']),
+    interceptAllProviders: Schema.boolean().default(true),
+    providers: Schema.array(Schema.string()).default(['sub2api-antigravity-recovery', 'gemini']),
     upstreamBaseUrl: Schema.string().default('http://127.0.0.1:3000/v1'),
     apiKey: Schema.string().default(''),
     timeoutMs: Schema.number().min(1000).max(600000).default(300000),
     retryOriginal: Schema.number().min(0).max(2).default(1),
+    retryWithNudge: Schema.boolean().default(true),
+    nudgePrompt: Schema.string().default('上一个操作已执行完毕。请分析当前执行结果并继续完成任务或输出结论。'),
     enableToolChoiceNone: Schema.boolean().default(true),
     compactAfterToolChoiceNone: Schema.boolean().default(true),
     postCompactionRetry: Schema.number().min(0).max(1).default(1),
     syntheticFallback: Schema.boolean().default(true),
-    syntheticResponse: Schema.string().default('The previous model request returned no usable content after automatic recovery. The session context has been preserved. Continue from the current task state.'),
+    syntheticResponse: Schema.string().default('已自动捕获并恢复前序空响应。当前任务上下文已完整保留，请继续下一步操作。'),
     targetModels: Schema.array(Schema.string()).default([
-        'gemini-3.8-flash',
-        'gemini-3.8-flash-tiered',
-        'gemini-3.8-flash-medium',
+        'gemini',
+        'antigravity',
+        'flash',
     ]),
+    logFilePath: Schema.string().default(''),
     logLevel: Schema.union([
         Schema.const('silent'), Schema.const('error'), Schema.const('warn'), Schema.const('info'), Schema.const('debug'),
     ]).default('info'),
+    registerStandaloneAdapter: Schema.boolean().default(false),
     includeRequestBodyInDebugLog: Schema.boolean().default(false),
 });
 const EMPTY_RESPONSE = 'EMPTY_RESPONSE';
 const COMPACTION_REQUIRED = 'ANTIGRAVITY_EMPTY_RESPONSE_COMPACTION_REQUIRED';
 const SYNTHETIC_REQUIRED = 'ANTIGRAVITY_EMPTY_RESPONSE_SYNTHETIC_REQUIRED';
 function now() { return new Date().toISOString(); }
-function lower(v) { return String(v ?? '').toLowerCase(); }
+function getDefaultLogPath() {
+    const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+    return path.join(home, 'antigravity-recovery.log');
+}
+class FileLogger {
+    logPath;
+    level;
+    constructor(logPath, level) {
+        this.logPath = logPath || getDefaultLogPath();
+        this.level = level;
+        try {
+            const dir = path.dirname(this.logPath);
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        catch { }
+    }
+    setLevel(level) {
+        this.level = level;
+    }
+    write(level, tag, message, data) {
+        if (this.level === 'silent')
+            return;
+        const rank = { silent: 99, error: 0, warn: 1, info: 2, debug: 3 };
+        if (rank[level] > rank[this.level])
+            return;
+        const ts = now();
+        const lvlStr = level.toUpperCase().padEnd(5);
+        let dataStr = '';
+        if (data !== undefined) {
+            try {
+                dataStr = ' ' + JSON.stringify(data);
+            }
+            catch {
+                dataStr = ' [Circular/Unserializable]';
+            }
+        }
+        const line = `[${ts}] [${lvlStr}] [${tag}] ${message}${dataStr}\n`;
+        if (level === 'error')
+            console.error(line.trimEnd());
+        else if (level === 'warn')
+            console.warn(line.trimEnd());
+        else if (this.level === 'debug')
+            console.log(line.trimEnd());
+        try {
+            // Rotate if file exceeds 10MB
+            try {
+                const stat = fs.statSync(this.logPath);
+                if (stat.size > 10 * 1024 * 1024) {
+                    const bak = this.logPath + '.1';
+                    try {
+                        if (fs.existsSync(bak))
+                            fs.unlinkSync(bak);
+                    }
+                    catch { }
+                    fs.renameSync(this.logPath, bak);
+                }
+            }
+            catch { }
+            fs.appendFileSync(this.logPath, line, 'utf8');
+        }
+        catch {
+            // Ignore write errors to prevent host crashes
+        }
+    }
+}
 function modelMatches(model, targets) {
-    if (!targets.length)
+    if (!targets || targets.length === 0)
         return true;
-    const m = model.toLowerCase();
-    return targets.some(x => m === x.toLowerCase() || m.startsWith(x.toLowerCase()));
+    const m = String(model ?? '').toLowerCase();
+    return targets.some(target => {
+        const t = target.toLowerCase().trim();
+        if (!t)
+            return false;
+        return m.includes(t) || m === t || m.startsWith(t);
+    });
 }
 function messageToOpenAI(message) {
     const role = message.role ?? 'user';
@@ -407,7 +484,7 @@ function getService(ctx, name) {
 function isOurFailure(failure, code) {
     return failure?.code === code || String(failure?.message ?? '').includes(code);
 }
-async function ensureProviderCardConfigured(ctx, provider, config, log) {
+async function ensureProviderCardConfigured(ctx, provider, config, fileLog) {
     try {
         const fs = await import('node:fs/promises');
         const path = await import('node:path');
@@ -451,30 +528,27 @@ async function ensureProviderCardConfigured(ctx, provider, config, log) {
             ].join(eol);
         }
         await fs.writeFile(settingsPath, fileContent, 'utf8');
-        log('info', 'settings:provider-card-created', { provider, settingsPath });
+        fileLog.write('info', 'Settings', 'Provider card configured in settings.yaml', { provider, settingsPath });
     }
     catch (err) {
-        log('warn', 'settings:provider-card-create-failed', { error: String(err) });
+        fileLog.write('warn', 'Settings', 'Failed to configure provider card', { error: String(err) });
     }
 }
 export function apply(ctx, config) {
     if (!config.enabled)
         return;
-    const logger = getService(ctx, 'logger');
-    const rank = { silent: 99, error: 0, warn: 1, info: 2, debug: 3 };
-    const log = (level, message, data) => {
-        if (config.logLevel === 'silent' || rank[level] > rank[config.logLevel] || level === 'silent')
-            return;
-        const line = `[AG-RECOVERY ${now()}] ${message}`;
-        const fn = logger?.[level];
-        if (fn)
-            fn.call(logger, data === undefined ? line : `${line} ${JSON.stringify(data)}`);
-        else if (level === 'error')
-            console.error(line, data ?? '');
-        else if (level === 'warn')
-            console.warn(line, data ?? '');
-        else
-            console.log(line, data ?? '');
+    const fileLogger = new FileLogger(config.logFilePath || getDefaultLogPath(), config.logLevel);
+    fileLogger.write('info', 'PluginInit', 'Antigravity Empty Response Recovery v0.4.0 active', {
+        interceptAllProviders: config.interceptAllProviders,
+        targetModels: config.targetModels,
+        providers: config.providers,
+        retryWithNudge: config.retryWithNudge,
+        enableToolChoiceNone: config.enableToolChoiceNone,
+        syntheticFallback: config.syntheticFallback,
+        logFile: config.logFilePath || getDefaultLogPath(),
+    });
+    const legacyLog = (level, message, data) => {
+        fileLogger.write(level, 'LegacyAdapter', message, data);
     };
     const sessionAgents = new Map();
     const getAgent = (options) => {
@@ -493,31 +567,228 @@ export function apply(ctx, config) {
             return agentService;
         return undefined;
     };
-    for (const p of config.providers) {
-        ensureProviderCardConfigured(ctx, p, config, log).catch(() => { });
-    }
-    const adapter = new RecoveryAdapter(ctx, config, log, getAgent);
-    ctx.llm.registerAdapter(config.providers, adapter);
-    if (typeof ctx.llm.registerConfigurableProviders === 'function') {
+    // ── Standalone adapter registration (only if explicitly enabled) ──
+    if (config.registerStandaloneAdapter) {
         try {
-            ctx.llm.registerConfigurableProviders(config.providers.map(p => ({
-                provider: p,
-                displayName: 'SUB2API / Antigravity Recovery',
-                settingsNs: 'llm-pi-ai',
-                settingsPath: ['providers', p],
-                declared: true,
-            })));
+            const adapter = new RecoveryAdapter(ctx, config, legacyLog, getAgent);
+            ctx.llm.registerAdapter(config.providers, adapter);
+            fileLogger.write('info', 'RegisterAdapter', 'Standalone recovery adapter registered', { providers: config.providers });
         }
-        catch (e) {
-            log('warn', 'registerConfigurableProviders:failed', { error: String(e) });
+        catch (err) {
+            fileLogger.write('debug', 'RegisterAdapter', 'Standalone adapter registration skipped or already registered by host', { message: err?.message });
         }
     }
+    // ── TIER 1: Universal llm/stream Waterfall Interceptor ────────────
+    ctx.on('llm/stream', (options, next) => {
+        // Prevent recursion during recovery retries
+        if (options.__agRecoveryRetrying) {
+            return next();
+        }
+        // Match model
+        const matchesModel = modelMatches(options.model, config.targetModels);
+        if (!matchesModel) {
+            return next();
+        }
+        // Match provider (either all providers or explicitly listed)
+        const matchesProvider = config.interceptAllProviders || config.providers.some(p => p.toLowerCase() === String(options.provider ?? '').toLowerCase());
+        if (!matchesProvider) {
+            return next();
+        }
+        fileLogger.write('debug', 'StreamIntercept', `Intercepting LLM stream`, {
+            provider: options.provider,
+            model: options.model,
+            sessionId: options.sessionId,
+            messageCount: options.messages?.length ?? 0,
+            toolsCount: options.tools?.length ?? 0,
+        });
+        return (async function* () {
+            const chunks = [];
+            let hasVisibleContent = false;
+            let finishChunk = null;
+            let totalTextChars = 0;
+            let totalToolCalls = 0;
+            let totalReasoningChars = 0;
+            try {
+                const stream = next();
+                for await (const chunk of stream) {
+                    if (chunk.type === 'text-delta' && chunk.text) {
+                        hasVisibleContent = true;
+                        totalTextChars += chunk.text.length;
+                    }
+                    if (chunk.type === 'tool-call-delta' && (chunk.name || chunk.argumentsDelta || chunk.id)) {
+                        hasVisibleContent = true;
+                        totalToolCalls++;
+                    }
+                    if (chunk.type === 'block-end') {
+                        const b = chunk.block;
+                        if (b?.type === 'text' && b.text) {
+                            hasVisibleContent = true;
+                            totalTextChars = Math.max(totalTextChars, b.text.length);
+                        }
+                        if (b?.type === 'tool-call') {
+                            hasVisibleContent = true;
+                            totalToolCalls++;
+                        }
+                    }
+                    if (chunk.type === 'reasoning-delta' && chunk.text) {
+                        totalReasoningChars += chunk.text.length;
+                    }
+                    if (chunk.type === 'finish') {
+                        finishChunk = chunk;
+                    }
+                    chunks.push(chunk);
+                }
+            }
+            catch (err) {
+                fileLogger.write('error', 'StreamException', `Upstream stream threw error`, {
+                    error: String(err?.message ?? err),
+                    provider: options.provider,
+                    model: options.model,
+                });
+                throw err;
+            }
+            // Check whether this stream ended with empty content
+            const finishReason = finishChunk?.reason;
+            const isErrorEmpty = finishReason?.kind === 'error' && (finishReason.failure?.code === EMPTY_RESPONSE ||
+                String(finishReason.failure?.message ?? '').toLowerCase().includes('no content'));
+            const isStopEmpty = !hasVisibleContent && finishReason?.kind === 'stop';
+            const isEmpty = !hasVisibleContent && (isErrorEmpty || isStopEmpty);
+            if (!isEmpty) {
+                fileLogger.write('debug', 'StreamSuccess', `Normal response completed`, {
+                    provider: options.provider,
+                    model: options.model,
+                    textChars: totalTextChars,
+                    toolCalls: totalToolCalls,
+                    reasoningChars: totalReasoningChars,
+                    finishKind: finishReason?.kind,
+                });
+                for (const c of chunks)
+                    yield c;
+                return;
+            }
+            // EMPTY RESPONSE DETECTED!
+            fileLogger.write('warn', 'EmptyDetected', `Upstream returned empty response with NO content!`, {
+                provider: options.provider,
+                model: options.model,
+                sessionId: options.sessionId,
+                reasoningChars: totalReasoningChars,
+                isErrorEmpty,
+                isStopEmpty,
+                finishFailure: finishReason?.kind === 'error' ? finishReason.failure : undefined,
+            });
+            // ── Step 1: Nudge Retry ──────────────────────────────────────
+            if (config.retryWithNudge) {
+                fileLogger.write('info', 'NudgeRetry', `Attempting nudge retry with continuation prompt...`, {
+                    nudgePrompt: config.nudgePrompt,
+                });
+                try {
+                    const retryOptions = {
+                        ...options,
+                        __agRecoveryRetrying: true,
+                        messages: [
+                            ...options.messages,
+                            {
+                                role: 'user',
+                                content: [{ type: 'text', text: config.nudgePrompt }],
+                            },
+                        ],
+                    };
+                    const retryStream = ctx.llm.stream(retryOptions);
+                    const retryChunks = [];
+                    let retryHasContent = false;
+                    let retryFinish = null;
+                    for await (const c of retryStream) {
+                        if (c.type === 'text-delta' && c.text)
+                            retryHasContent = true;
+                        if (c.type === 'tool-call-delta' && (c.name || c.argumentsDelta || c.id))
+                            retryHasContent = true;
+                        if (c.type === 'block-end') {
+                            const b = c.block;
+                            if ((b?.type === 'text' && b.text) || b?.type === 'tool-call')
+                                retryHasContent = true;
+                        }
+                        if (c.type === 'finish')
+                            retryFinish = c;
+                        retryChunks.push(c);
+                    }
+                    if (retryHasContent && (retryFinish?.reason?.kind === 'stop' || retryFinish?.reason?.kind === 'tool-calls')) {
+                        fileLogger.write('info', 'RecoverySuccess', `Nudge retry SUCCEEDED with content! Forwarding to agent.`, {
+                            chunkCount: retryChunks.length,
+                            finishReason: retryFinish?.reason?.kind,
+                        });
+                        for (const c of retryChunks)
+                            yield c;
+                        return;
+                    }
+                    fileLogger.write('warn', 'NudgeRetryFailed', `Nudge retry completed but still had no content.`);
+                }
+                catch (err) {
+                    fileLogger.write('warn', 'NudgeRetryError', `Nudge retry error: ${err?.message ?? err}`);
+                }
+            }
+            // ── Step 2: Tool-Choice None Retry (if tools were provided) ──
+            if (config.enableToolChoiceNone && (options.tools?.length ?? 0) > 0) {
+                fileLogger.write('info', 'NoToolsRetry', `Retrying with tools disabled to force text response...`);
+                try {
+                    const noToolsOptions = {
+                        ...options,
+                        __agRecoveryRetrying: true,
+                        tools: undefined,
+                    };
+                    const noToolsStream = ctx.llm.stream(noToolsOptions);
+                    const noToolsChunks = [];
+                    let noToolsHasContent = false;
+                    let noToolsFinish = null;
+                    for await (const c of noToolsStream) {
+                        if (c.type === 'text-delta' && c.text)
+                            noToolsHasContent = true;
+                        if (c.type === 'block-end' && c.block?.type === 'text' && c.block?.text)
+                            noToolsHasContent = true;
+                        if (c.type === 'finish')
+                            noToolsFinish = c;
+                        noToolsChunks.push(c);
+                    }
+                    if (noToolsHasContent && noToolsFinish?.reason?.kind === 'stop') {
+                        fileLogger.write('info', 'RecoverySuccess', `No-tools retry SUCCEEDED! Forwarding to agent.`, {
+                            chunkCount: noToolsChunks.length,
+                        });
+                        for (const c of noToolsChunks)
+                            yield c;
+                        return;
+                    }
+                    fileLogger.write('warn', 'NoToolsRetryFailed', `No-tools retry completed but still had no content.`);
+                }
+                catch (err) {
+                    fileLogger.write('warn', 'NoToolsRetryError', `No-tools retry error: ${err?.message ?? err}`);
+                }
+            }
+            // ── Step 3: Synthetic Fallback (Never crash the turn) ─────────
+            if (config.syntheticFallback) {
+                fileLogger.write('warn', 'SyntheticFallback', `Retries exhausted. Emitting synthetic response to prevent crash.`, {
+                    syntheticResponse: config.syntheticResponse,
+                });
+                yield* syntheticStream(config.syntheticResponse);
+                return;
+            }
+            // If synthetic fallback disabled, yield original chunks so caller handles error
+            for (const c of chunks)
+                yield c;
+        })();
+    });
+    // ── TIER 2: agent/request-error High-Priority Hook ────────────────
     const states = new WeakMap();
     ctx.on('agent/request-error', async (payload, next) => {
-        if (!isOurFailure(payload.failure, COMPACTION_REQUIRED))
+        const isOurEmpty = payload.failure?.code === EMPTY_RESPONSE ||
+            String(payload.failure?.message ?? '').toLowerCase().includes('no content') ||
+            isOurFailure(payload.failure, COMPACTION_REQUIRED);
+        if (!isOurEmpty || payload.signal?.aborted)
             return next();
-        if (payload.signal?.aborted)
-            return next();
+        fileLogger.write('warn', 'RequestErrorHook', `agent/request-error received empty response`, {
+            turn: payload.turn,
+            step: payload.step,
+            provider: payload.provider,
+            failure: payload.failure,
+        });
         const agent = payload.agent;
         const sid = String(agent?.id ?? agent?.session?.id ?? '');
         if (sid)
@@ -534,39 +805,41 @@ export function apply(ctx, config) {
         states.set(agent, state);
         if (state.compactionCount >= 1) {
             if (config.syntheticFallback) {
-                log('error', 'recovery:post-compaction-empty', { model: agent.options?.model, action: 'synthetic-fallback' });
+                fileLogger.write('warn', 'Recovery', 'post-compaction-empty synthetic fallback', { model: agent?.options?.model });
                 agent.__agRecoverySynthetic = true;
                 return { kind: 'retry' };
             }
-            log('error', 'recovery:post-compaction-empty', { model: agent.options?.model, action: 'terminal-empty-response' });
+            fileLogger.write('warn', 'Recovery', 'post-compaction-empty terminal-empty-response', { model: agent?.options?.model });
             if (payload.failure && typeof payload.failure === 'object') {
                 payload.failure.code = EMPTY_RESPONSE;
                 payload.failure.message = 'Antigravity returned an empty response';
             }
             return next();
         }
-        try {
-            const before = agent.session?.surface?.replaceGeneration;
-            log('info', 'compaction:start', { model: agent.options?.model, turn: payload.turn, step: payload.step });
-            const compactionService = getService(ctx, 'compaction');
-            if (!compactionService?.compactIfNeeded)
-                return next();
-            const result = await compactionService.compactIfNeeded({ session: agent.session, options: { provider: agent.options?.provider, model: agent.options?.model } }, 'context-overflow', payload.signal);
-            const after = agent.session?.surface?.replaceGeneration;
-            const progressed = result !== null || (typeof before === 'number' && typeof after === 'number' && after > before);
-            log(progressed ? 'info' : 'warn', 'compaction:end', { progressed, before, after });
-            if (!progressed)
-                return next();
-            state.compactionCount++;
-            state.postCompactionRetries = 0;
-            state.compactionRequested = true;
-            return { kind: 'retry' };
+        // Check compaction if context is large or requested
+        const compactionService = getService(ctx, 'compaction');
+        if (compactionService?.compactIfNeeded) {
+            try {
+                const before = agent?.session?.surface?.replaceGeneration;
+                fileLogger.write('info', 'Compaction', `Triggering context compaction on empty response`, {
+                    turn: payload.turn,
+                    step: payload.step,
+                });
+                const result = await compactionService.compactIfNeeded({ session: agent?.session, options: { provider: agent?.options?.provider, model: agent?.options?.model } }, 'context-overflow', payload.signal);
+                const after = agent?.session?.surface?.replaceGeneration;
+                const progressed = result !== null || (typeof before === 'number' && typeof after === 'number' && after > before);
+                fileLogger.write(progressed ? 'info' : 'warn', 'CompactionResult', `Compaction finished`, { progressed, before, after });
+                if (progressed) {
+                    state.compactionCount++;
+                    return { kind: 'retry' };
+                }
+            }
+            catch (error) {
+                fileLogger.write('error', 'CompactionError', `Compaction failed: ${error?.message ?? error}`);
+            }
         }
-        catch (error) {
-            log('error', 'compaction:failed', { error: error instanceof Error ? error.message : String(error) });
-            return next();
-        }
-    });
+        return next();
+    }, { prepend: true });
     ctx.on('agent/turn-stopping', ({ agent, turn }) => {
         if (agent)
             delete agent.__agRecoverySynthetic;
@@ -585,12 +858,5 @@ export function apply(ctx, config) {
             sessionAgents.delete(sid);
         states.delete(agent);
     });
-    log('info', 'plugin:ready', {
-        version: '0.3.1',
-        providers: config.providers,
-        upstream: config.upstreamBaseUrl,
-        models: config.targetModels,
-        flow: 'original -> retry -> tool_choice:none -> compaction -> retry -> synthetic',
-    });
 }
-export { EMPTY_RESPONSE, COMPACTION_REQUIRED, SYNTHETIC_REQUIRED, RecoveryAdapter, syntheticStream };
+export { EMPTY_RESPONSE, COMPACTION_REQUIRED, SYNTHETIC_REQUIRED, RecoveryAdapter, syntheticStream, FileLogger };

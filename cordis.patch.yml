@@ -1,18 +1,19 @@
 # dsh-antigravity-empty-response-recovery bundle patch
-# Inserts the recovery adapter into the profile patch stack
+# Inserts the recovery interceptor into the profile patch stack
 - insert:
     - id: dsh-antigravity-empty-response-recovery
       name: 'dsh-antigravity-empty-response-recovery'
       config:
         enabled: true
-        providers:
-          - sub2api-antigravity-recovery
-        upstreamBaseUrl: http://127.0.0.1:3000/v1
-        apiKey: ''
-        timeoutMs: 300000
-        retryOriginal: 1
+        interceptAllProviders: true
+        targetModels:
+          - gemini
+          - antigravity
+          - flash
+        retryWithNudge: true
+        nudgePrompt: '上一个操作已执行完毕。请分析当前执行结果并继续完成任务或输出结论。'
         enableToolChoiceNone: true
-        compactAfterToolChoiceNone: true
-        postCompactionRetry: 1
         syntheticFallback: true
+        syntheticResponse: '已自动捕获并恢复前序空响应。当前任务上下文已完整保留，请继续下一步操作。'
+        logFilePath: ''
         logLevel: info
