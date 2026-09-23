@@ -602,31 +602,50 @@ export function apply(ctx, config) {
             toolsCount: options.tools?.length ?? 0,
         });
         return (async function* () {
-            const chunks = [];
-            let hasVisibleContent = false;
+            const buffer = [];
+            let streaming = false;
             let finishChunk = null;
+            let usageInfo = null;
             let totalTextChars = 0;
             let totalToolCalls = 0;
             let totalReasoningChars = 0;
             try {
                 const stream = next();
                 for await (const chunk of stream) {
+                    if (chunk.type === 'usage') {
+                        usageInfo = chunk.usage;
+                    }
+                    if (streaming) {
+                        // Content already confirmed: stream out in real time with 0 latency
+                        if (chunk.type === 'text-delta' && chunk.text)
+                            totalTextChars += chunk.text.length;
+                        if (chunk.type === 'tool-call-delta' && (chunk.name || chunk.argumentsDelta || chunk.id))
+                            totalToolCalls++;
+                        if (chunk.type === 'reasoning-delta' && chunk.text)
+                            totalReasoningChars += chunk.text.length;
+                        if (chunk.type === 'finish')
+                            finishChunk = chunk;
+                        yield chunk;
+                        continue;
+                    }
+                    // Check for first visible content
+                    let isContentChunk = false;
                     if (chunk.type === 'text-delta' && chunk.text) {
-                        hasVisibleContent = true;
+                        isContentChunk = true;
                         totalTextChars += chunk.text.length;
                     }
                     if (chunk.type === 'tool-call-delta' && (chunk.name || chunk.argumentsDelta || chunk.id)) {
-                        hasVisibleContent = true;
+                        isContentChunk = true;
                         totalToolCalls++;
                     }
                     if (chunk.type === 'block-end') {
                         const b = chunk.block;
                         if (b?.type === 'text' && b.text) {
-                            hasVisibleContent = true;
+                            isContentChunk = true;
                             totalTextChars = Math.max(totalTextChars, b.text.length);
                         }
                         if (b?.type === 'tool-call') {
-                            hasVisibleContent = true;
+                            isContentChunk = true;
                             totalToolCalls++;
                         }
                     }
@@ -636,7 +655,14 @@ export function apply(ctx, config) {
                     if (chunk.type === 'finish') {
                         finishChunk = chunk;
                     }
-                    chunks.push(chunk);
+                    buffer.push(chunk);
+                    if (isContentChunk) {
+                        // First content chunk detected! Flush buffer immediately and switch to real-time streaming
+                        streaming = true;
+                        for (const c of buffer)
+                            yield c;
+                        buffer.length = 0;
+                    }
                 }
             }
             catch (err) {
@@ -647,22 +673,28 @@ export function apply(ctx, config) {
                 });
                 throw err;
             }
-            // Check whether this stream ended with empty content
-            const finishReason = finishChunk?.reason;
-            const isErrorEmpty = finishReason?.kind === 'error' && (finishReason.failure?.code === EMPTY_RESPONSE ||
-                String(finishReason.failure?.message ?? '').toLowerCase().includes('no content'));
-            const isStopEmpty = !hasVisibleContent && finishReason?.kind === 'stop';
-            const isEmpty = !hasVisibleContent && (isErrorEmpty || isStopEmpty);
-            if (!isEmpty) {
-                fileLogger.write('debug', 'StreamSuccess', `Normal response completed`, {
+            if (streaming) {
+                fileLogger.write('info', 'StreamSuccess', `Normal response streamed in real-time`, {
                     provider: options.provider,
                     model: options.model,
                     textChars: totalTextChars,
                     toolCalls: totalToolCalls,
                     reasoningChars: totalReasoningChars,
-                    finishKind: finishReason?.kind,
+                    cacheRead: usageInfo?.cacheRead ?? usageInfo?.cachedTokens ?? 0,
+                    inputTokens: usageInfo?.inputTokens,
+                    outputTokens: usageInfo?.outputTokens,
+                    finishKind: finishChunk?.reason?.kind,
                 });
-                for (const c of chunks)
+                return;
+            }
+            // If streaming never became true, check whether this stream ended with empty content
+            const finishReason = finishChunk?.reason;
+            const isErrorEmpty = finishReason?.kind === 'error' && (finishReason.failure?.code === EMPTY_RESPONSE ||
+                String(finishReason.failure?.message ?? '').toLowerCase().includes('no content'));
+            const isStopEmpty = finishReason?.kind === 'stop';
+            const isEmpty = isErrorEmpty || isStopEmpty;
+            if (!isEmpty) {
+                for (const c of buffer)
                     yield c;
                 return;
             }
@@ -771,7 +803,7 @@ export function apply(ctx, config) {
                 return;
             }
             // If synthetic fallback disabled, yield original chunks so caller handles error
-            for (const c of chunks)
+            for (const c of buffer)
                 yield c;
         })();
     });
