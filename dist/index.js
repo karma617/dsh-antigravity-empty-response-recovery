@@ -538,7 +538,7 @@ export function apply(ctx, config) {
     if (!config.enabled)
         return;
     const fileLogger = new FileLogger(config.logFilePath || getDefaultLogPath(), config.logLevel);
-    fileLogger.write('info', 'PluginInit', 'Antigravity Empty Response Recovery v0.4.0 active', {
+    fileLogger.write('info', 'PluginInit', 'Antigravity Empty Response Recovery v0.4.2 active', {
         interceptAllProviders: config.interceptAllProviders,
         targetModels: config.targetModels,
         providers: config.providers,
@@ -714,16 +714,52 @@ export function apply(ctx, config) {
                     nudgePrompt: config.nudgePrompt,
                 });
                 try {
-                    const retryOptions = {
-                        ...options,
-                        __agRecoveryRetrying: true,
-                        messages: [
-                            ...options.messages,
+                    let retryMessages = [];
+                    const origMessages = options.messages || [];
+                    if (origMessages.length > 0) {
+                        const lastMsg = origMessages[origMessages.length - 1];
+                        if (lastMsg && (lastMsg.role === 'user' || lastMsg.role === 'toolResult')) {
+                            // Merge into existing user message so role alternation is preserved
+                            // and upstream prefix caching (Gemini / Anthropic) is not disrupted by consecutive user messages!
+                            const updatedLastMsg = { ...lastMsg };
+                            if (Array.isArray(lastMsg.content)) {
+                                updatedLastMsg.content = [
+                                    ...lastMsg.content,
+                                    { type: 'text', text: `\n\n${config.nudgePrompt}` },
+                                ];
+                            }
+                            else if (typeof lastMsg.content === 'string') {
+                                updatedLastMsg.content = [
+                                    { type: 'text', text: `${lastMsg.content}\n\n${config.nudgePrompt}` },
+                                ];
+                            }
+                            else {
+                                updatedLastMsg.content = [{ type: 'text', text: config.nudgePrompt }];
+                            }
+                            retryMessages = [...origMessages.slice(0, -1), updatedLastMsg];
+                        }
+                        else {
+                            retryMessages = [
+                                ...origMessages,
+                                {
+                                    role: 'user',
+                                    content: [{ type: 'text', text: config.nudgePrompt }],
+                                },
+                            ];
+                        }
+                    }
+                    else {
+                        retryMessages = [
                             {
                                 role: 'user',
                                 content: [{ type: 'text', text: config.nudgePrompt }],
                             },
-                        ],
+                        ];
+                    }
+                    const retryOptions = {
+                        ...options,
+                        __agRecoveryRetrying: true,
+                        messages: retryMessages,
                     };
                     const retryStream = ctx.llm.stream(retryOptions);
                     const retryChunks = [];
