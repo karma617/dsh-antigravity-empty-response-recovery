@@ -538,7 +538,7 @@ export function apply(ctx, config) {
     if (!config.enabled)
         return;
     const fileLogger = new FileLogger(config.logFilePath || getDefaultLogPath(), config.logLevel);
-    fileLogger.write('info', 'PluginInit', 'Antigravity Empty Response Recovery v0.4.2 active', {
+    fileLogger.write('info', 'PluginInit', 'Antigravity Empty Response Recovery v0.4.3 active', {
         interceptAllProviders: config.interceptAllProviders,
         targetModels: config.targetModels,
         providers: config.providers,
@@ -609,6 +609,7 @@ export function apply(ctx, config) {
             let totalTextChars = 0;
             let totalToolCalls = 0;
             let totalReasoningChars = 0;
+            let accumulatedText = '';
             try {
                 const stream = next();
                 for await (const chunk of stream) {
@@ -633,6 +634,7 @@ export function apply(ctx, config) {
                     if (chunk.type === 'text-delta' && chunk.text) {
                         isContentChunk = true;
                         totalTextChars += chunk.text.length;
+                        accumulatedText += chunk.text;
                     }
                     if (chunk.type === 'tool-call-delta' && (chunk.name || chunk.argumentsDelta || chunk.id)) {
                         isContentChunk = true;
@@ -643,6 +645,8 @@ export function apply(ctx, config) {
                         if (b?.type === 'text' && b.text) {
                             isContentChunk = true;
                             totalTextChars = Math.max(totalTextChars, b.text.length);
+                            if (!accumulatedText)
+                                accumulatedText = b.text;
                         }
                         if (b?.type === 'tool-call') {
                             isContentChunk = true;
@@ -657,11 +661,19 @@ export function apply(ctx, config) {
                     }
                     buffer.push(chunk);
                     if (isContentChunk) {
-                        // First content chunk detected! Flush buffer immediately and switch to real-time streaming
-                        streaming = true;
-                        for (const c of buffer)
-                            yield c;
-                        buffer.length = 0;
+                        // Check if this text might be the beginning of a leaked raw tool call (e.g. "call:default_api:run_code{" or "<call:")
+                        const trimmed = accumulatedText.trim();
+                        const looksLikeLeakedCall = totalToolCalls === 0 && (trimmed.startsWith('call:') ||
+                            trimmed.startsWith('<call:') ||
+                            trimmed.startsWith('default_api:') ||
+                            (trimmed.length < 5 && 'call:'.startsWith(trimmed)));
+                        if (!looksLikeLeakedCall || totalToolCalls > 0) {
+                            // Not a leaked tool call: flush buffer immediately and switch to real-time streaming
+                            streaming = true;
+                            for (const c of buffer)
+                                yield c;
+                            buffer.length = 0;
+                        }
                     }
                 }
             }
@@ -687,31 +699,51 @@ export function apply(ctx, config) {
                 });
                 return;
             }
-            // If streaming never became true, check whether this stream ended with empty content
+            // If streaming never became true, check whether this stream ended with empty content or a leaked raw tool call
+            const leakedCallMatch = totalToolCalls === 0
+                ? /^\s*<?(?:call:)?(?:default_api:)?([a-zA-Z0-9_-]+)\s*\{/i.exec(accumulatedText)
+                : null;
+            const isLeakedToolCall = Boolean(leakedCallMatch);
             const finishReason = finishChunk?.reason;
             const isErrorEmpty = finishReason?.kind === 'error' && (finishReason.failure?.code === EMPTY_RESPONSE ||
                 String(finishReason.failure?.message ?? '').toLowerCase().includes('no content'));
-            const isStopEmpty = finishReason?.kind === 'stop';
+            const isStopEmpty = finishReason?.kind === 'stop' && totalTextChars === 0 && totalToolCalls === 0;
             const isEmpty = isErrorEmpty || isStopEmpty;
-            if (!isEmpty) {
+            if (!isEmpty && !isLeakedToolCall) {
                 for (const c of buffer)
                     yield c;
                 return;
             }
-            // EMPTY RESPONSE DETECTED!
-            fileLogger.write('warn', 'EmptyDetected', `Upstream returned empty response with NO content!`, {
-                provider: options.provider,
-                model: options.model,
-                sessionId: options.sessionId,
-                reasoningChars: totalReasoningChars,
-                isErrorEmpty,
-                isStopEmpty,
-                finishFailure: finishReason?.kind === 'error' ? finishReason.failure : undefined,
-            });
+            if (isLeakedToolCall) {
+                const leakedTool = leakedCallMatch[1];
+                fileLogger.write('warn', 'LeakedToolCallDetected', `Upstream returned text tool call instead of Function Calling! Tool: ${leakedTool}`, {
+                    provider: options.provider,
+                    model: options.model,
+                    sessionId: options.sessionId,
+                    leakedTool,
+                    snippet: accumulatedText.slice(0, 300),
+                });
+            }
+            else {
+                // EMPTY RESPONSE DETECTED!
+                fileLogger.write('warn', 'EmptyDetected', `Upstream returned empty response with NO content!`, {
+                    provider: options.provider,
+                    model: options.model,
+                    sessionId: options.sessionId,
+                    reasoningChars: totalReasoningChars,
+                    isErrorEmpty,
+                    isStopEmpty,
+                    finishFailure: finishReason?.kind === 'error' ? finishReason.failure : undefined,
+                });
+            }
             // ── Step 1: Nudge Retry ──────────────────────────────────────
             if (config.retryWithNudge) {
+                const currentNudge = isLeakedToolCall && leakedCallMatch
+                    ? `注意：请直接使用标准结构化函数调用（Tool Call）机制调用 ${leakedCallMatch[1]} 工具，严禁输出 call:default_api 纯文本代码。请立即重新调用该工具。`
+                    : config.nudgePrompt;
                 fileLogger.write('info', 'NudgeRetry', `Attempting nudge retry with continuation prompt...`, {
-                    nudgePrompt: config.nudgePrompt,
+                    nudgePrompt: currentNudge,
+                    isLeakedToolCall,
                 });
                 try {
                     let retryMessages = [];
@@ -725,16 +757,16 @@ export function apply(ctx, config) {
                             if (Array.isArray(lastMsg.content)) {
                                 updatedLastMsg.content = [
                                     ...lastMsg.content,
-                                    { type: 'text', text: `\n\n${config.nudgePrompt}` },
+                                    { type: 'text', text: `\n\n${currentNudge}` },
                                 ];
                             }
                             else if (typeof lastMsg.content === 'string') {
                                 updatedLastMsg.content = [
-                                    { type: 'text', text: `${lastMsg.content}\n\n${config.nudgePrompt}` },
+                                    { type: 'text', text: `${lastMsg.content}\n\n${currentNudge}` },
                                 ];
                             }
                             else {
-                                updatedLastMsg.content = [{ type: 'text', text: config.nudgePrompt }];
+                                updatedLastMsg.content = [{ type: 'text', text: currentNudge }];
                             }
                             retryMessages = [...origMessages.slice(0, -1), updatedLastMsg];
                         }
@@ -743,7 +775,7 @@ export function apply(ctx, config) {
                                 ...origMessages,
                                 {
                                     role: 'user',
-                                    content: [{ type: 'text', text: config.nudgePrompt }],
+                                    content: [{ type: 'text', text: currentNudge }],
                                 },
                             ];
                         }
@@ -752,7 +784,7 @@ export function apply(ctx, config) {
                         retryMessages = [
                             {
                                 role: 'user',
-                                content: [{ type: 'text', text: config.nudgePrompt }],
+                                content: [{ type: 'text', text: currentNudge }],
                             },
                         ];
                     }
