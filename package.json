@@ -1,7 +1,7 @@
 {
   "name": "dsh-antigravity-empty-response-recovery",
-  "version": "0.4.3",
-  "description": "All-in-one DSH 0.1.6-alpha.2 recovery adapter for Antigravity/SUB2API empty responses.",
+  "version": "0.4.4",
+  "description": "All-in-one DSH recovery adapter for Antigravity/SUB2API empty responses (compatible with DSH 0.1.6+ and 0.2.0-rc.2+).",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -23,8 +23,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-compaction": "0.1.6-alpha.2",
-    "@deepseek-ai/dsh-llm": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-compaction": "*",
+    "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/schemastery": "*"
   },
   "dsh": {
@@ -34,6 +34,10 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/recovery.test.mjs"
+    "test": "npm run build && node --test test/recovery.test.mjs && node --test test/universal-stream.test.mjs && node --test test/stream.test.js && node --test test/dsh-compatibility.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "typescript": "^7.0.2"
   }
 }

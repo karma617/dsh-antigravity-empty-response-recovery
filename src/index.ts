@@ -565,7 +565,7 @@ export function apply(ctx: Context, config: Config) {
   if (!config.enabled) return
 
   const fileLogger = new FileLogger(config.logFilePath || getDefaultLogPath(), config.logLevel)
-  fileLogger.write('info', 'PluginInit', 'Antigravity Empty Response Recovery v0.4.3 active', {
+  fileLogger.write('info', 'PluginInit', 'Antigravity Empty Response Recovery v0.4.4 active', {
     interceptAllProviders: config.interceptAllProviders,
     targetModels: config.targetModels,
     providers: config.providers,

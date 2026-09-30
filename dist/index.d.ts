@@ -13,7 +13,7 @@ declare module '@deepseek-ai/cordis' {
     }
 }
 export declare const name = "dsh-antigravity-empty-response-recovery";
-export declare const inject: readonly ["llm"];
+export declare const inject: readonly ['llm'];
 export interface Config {
     enabled: boolean;
     interceptAllProviders: boolean;

@@ -1,6 +1,6 @@
-# DSh Antigravity Empty Response Recovery 0.4.0
+# DSH Antigravity Empty Response Recovery v0.4.4
 
-面向 DSh `0.1.6-alpha.2` / DSH Desktop 的全自动 SUB2API / Antigravity 空响应恢复插件。
+面向 DSH `0.1.6-alpha.2`、`0.2.0-rc.2` 及更高版本 / DSH Desktop 的全自动 SUB2API / Antigravity 空响应恢复插件。
 
 ## 核心特性 (v0.4.0)
 
@@ -60,6 +60,6 @@ Get-Content -Path "C:\Users\Administrator\.dsh\antigravity-recovery.log" -Wait -
 
 运行完整单元测试套件：
 ```bash
-node --test test/recovery.test.mjs test/universal-stream.test.mjs
+pnpm test
 ```
-包含了 16 项针对正常请求、空响应重试、工具剥离重试、合成流生成、上下文压缩等核心场景的端到端单测。
+包含了 23 项针对正常请求、空响应重试、工具剥离重试、合成流生成、上下文压缩、以及 DSH 0.2.0-rc.2 兼容性预检的核心场景单测。

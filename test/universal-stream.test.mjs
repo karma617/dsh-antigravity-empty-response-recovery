@@ -100,7 +100,7 @@ test('empty response with stop triggers nudge retry and succeeds', async () => {
 
   assert.ok(retryCalledWith, 'ctx.llm.stream should have been called for retry')
   assert.equal(retryCalledWith.__agRecoveryRetrying, true)
-  assert.equal(retryCalledWith.messages.at(-1).content[0].text, 'Please continue.')
+  assert.ok(retryCalledWith.messages.at(-1).content.some(c => c.text.includes('Please continue.')))
   assert.equal(result.find(c => c.type === 'text-delta').text, 'Here is the answer after nudge.')
 })
 

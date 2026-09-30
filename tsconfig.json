@@ -7,6 +7,8 @@
     "skipLibCheck": true,
     "declaration": true,
     "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"],
     "typeRoots": [
       "node_modules/@types",
       "../deepseek-harness-desktop/node_modules/@types"
