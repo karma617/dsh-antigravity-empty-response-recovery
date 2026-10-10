@@ -58,6 +58,11 @@ test('Plugin manifest is 100% compatible with DSH 0.2.0-rc.2', () => {
   assert.equal(result, undefined, 'Must not report any incompatibility on DSH 0.2.0-rc.2')
 })
 
+test('Plugin manifest is 100% compatible with DSH 0.2.1-alpha.2', () => {
+  const result = evaluatePluginCompatibility(manifest, {}, '0.2.1-alpha.2')
+  assert.equal(result, undefined, 'Must not report any incompatibility on DSH 0.2.1-alpha.2')
+})
+
 test('Plugin manifest is backwards compatible with DSH 0.1.6-alpha.2', () => {
   const result = evaluatePluginCompatibility(manifest, {}, '0.1.6-alpha.2')
   assert.equal(result, undefined, 'Must not report any incompatibility on DSH 0.1.6-alpha.2')

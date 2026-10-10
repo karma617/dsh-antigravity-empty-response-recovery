@@ -1,4 +1,4 @@
-# DSH Antigravity Empty Response Recovery v0.4.4
+# DSH Antigravity Empty Response Recovery v0.4.5
 
 面向 DSH `0.1.6-alpha.2`、`0.2.0-rc.2` 及更高版本 / DSH Desktop 的全自动 SUB2API / Antigravity 空响应恢复插件。
 

@@ -167,3 +167,44 @@ test('exhausted retries emit synthetic fallback to prevent crash', async () => {
   assert.ok(result.some(c => c.type === 'text-delta' && c.text === '[Recovery] Response recovered'))
   assert.equal(result.at(-1).reason.kind, 'stop')
 })
+test('exhausted retries emit synthetic fallback and trigger auto-continue steer on agent', async () => {
+  const steeredPrompts = []
+  const mockAgent = {
+    id: 'test-agent-1',
+    steer(prompt) {
+      steeredPrompts.push(prompt)
+    },
+  }
+
+  const { streamHook, setDownstream } = setupContext({
+    autoContinueOnSynthetic: true,
+    autoContinuePrompt: 'Continue automatically please',
+  })
+
+  const emptyChunks = [
+    { type: 'finish', reason: { kind: 'error', failure: { code: EMPTY_RESPONSE, message: 'model returned a completed response with no content' } } },
+  ]
+  const next = () => (async function* () {
+    for (const c of emptyChunks) yield c
+  })()
+
+  setDownstream(() => (async function* () {
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })())
+
+  const options = {
+    provider: 'gemini',
+    model: 'gemini-3.8-flash-tiered',
+    agent: mockAgent,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'test' }] }],
+  }
+  const result = await collect(streamHook(options, next))
+
+  assert.ok(result.some(c => c.type === 'text-delta' && c.text === '[Recovery] Response recovered'))
+  
+  // Wait for the asynchronous steer timeout
+  await new Promise(resolve => setTimeout(resolve, 80))
+
+  assert.equal(steeredPrompts.length, 1)
+  assert.equal(steeredPrompts[0], 'Continue automatically please')
+})

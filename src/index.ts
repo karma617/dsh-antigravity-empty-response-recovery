@@ -44,6 +44,9 @@ export interface Config {
   postCompactionRetry: number
   syntheticFallback: boolean
   syntheticResponse: string
+  autoContinueOnSynthetic: boolean
+  autoContinuePrompt: string
+  autoContinueMaxConsecutive: number
   targetModels: string[]
   logFilePath?: string
   logLevel: 'silent' | 'error' | 'warn' | 'info' | 'debug'
@@ -66,6 +69,9 @@ export const Config: any = Schema.object({
   postCompactionRetry: Schema.number().min(0).max(1).default(1),
   syntheticFallback: Schema.boolean().default(true),
   syntheticResponse: Schema.string().default('已自动捕获并恢复前序空响应。当前任务上下文已完整保留，请继续下一步操作。'),
+  autoContinueOnSynthetic: Schema.boolean().default(true),
+  autoContinuePrompt: Schema.string().default('上一个操作已执行完毕，任务未结束。请根据已知执行结果与上下文，继续执行下一步任务或输出最终分析结论。'),
+  autoContinueMaxConsecutive: Schema.number().min(1).max(10).default(3),
   targetModels: Schema.array(Schema.string()).default([
     'gemini',
     'antigravity',
@@ -565,7 +571,7 @@ export function apply(ctx: Context, config: Config) {
   if (!config.enabled) return
 
   const fileLogger = new FileLogger(config.logFilePath || getDefaultLogPath(), config.logLevel)
-  fileLogger.write('info', 'PluginInit', 'Antigravity Empty Response Recovery v0.4.4 active', {
+  fileLogger.write('info', 'PluginInit', 'Antigravity Empty Response Recovery v0.4.5 active', {
     interceptAllProviders: config.interceptAllProviders,
     targetModels: config.targetModels,
     providers: config.providers,
@@ -580,6 +586,39 @@ export function apply(ctx: Context, config: Config) {
   }
 
   const sessionAgents = new Map<string, any>()
+  const consecutiveSyntheticCounts = new Map<string, number>()
+
+  const triggerAutoContinue = (agent: any, sessionId?: string | number) => {
+    if (!config.autoContinueOnSynthetic || !agent) return
+    const key = String(agent?.id ?? agent?.session?.id ?? sessionId ?? 'default')
+    const currentCount = consecutiveSyntheticCounts.get(key) ?? 0
+    if (currentCount >= config.autoContinueMaxConsecutive) {
+      fileLogger.write('warn', 'AutoContinueLimit', `Consecutive synthetic limit reached (${currentCount}/${config.autoContinueMaxConsecutive}). Halting to prevent infinite loop.`, { key })
+      return
+    }
+    consecutiveSyntheticCounts.set(key, currentCount + 1)
+    fileLogger.write('info', 'AutoContinueSteer', `Injecting auto-continue steer into agent to continue task seamlessly (${currentCount + 1}/${config.autoContinueMaxConsecutive})`, { key, prompt: config.autoContinuePrompt })
+
+    // Schedule steer asynchronously after current stream settles
+    setTimeout(() => {
+      try {
+        if (typeof agent.steer === 'function') {
+          agent.steer(config.autoContinuePrompt)
+        } else if (typeof agent.followup === 'function') {
+          agent.followup(config.autoContinuePrompt)
+        } else if (typeof agent.send === 'function') {
+          agent.send(config.autoContinuePrompt, 'next-step', true)
+        } else if (typeof agent.inbox?.append === 'function') {
+          agent.inbox.append('next-step', config.autoContinuePrompt)
+        } else {
+          fileLogger.write('warn', 'AutoContinueFailed', 'Agent does not have steer/followup/send method', { agentKeys: Object.keys(agent) })
+        }
+      } catch (err: any) {
+        fileLogger.write('error', 'AutoContinueError', `Failed to invoke agent steer: ${err?.message ?? err}`)
+      }
+    }, 50)
+  }
+
   const getAgent = (options: GenerateOptions) => {
     if ((options as any).agent) return (options as any).agent
     const sid = String(options.sessionId ?? '')
@@ -717,6 +756,8 @@ export function apply(ctx: Context, config: Config) {
       }
 
       if (streaming) {
+        const sid = String(options.sessionId ?? '')
+        if (sid) consecutiveSyntheticCounts.delete(sid)
         fileLogger.write('info', 'StreamSuccess', `Normal response streamed in real-time`, {
           provider: options.provider,
           model: options.model,
@@ -897,7 +938,12 @@ export function apply(ctx: Context, config: Config) {
       if (config.syntheticFallback) {
         fileLogger.write('warn', 'SyntheticFallback', `Retries exhausted. Emitting synthetic response to prevent crash.`, {
           syntheticResponse: config.syntheticResponse,
+          autoContinue: config.autoContinueOnSynthetic,
         })
+        const agent = getAgent(options)
+        if (agent) {
+          triggerAutoContinue(agent, options.sessionId)
+        }
         yield* syntheticStream(config.syntheticResponse)
         return
       }
@@ -985,7 +1031,9 @@ export function apply(ctx: Context, config: Config) {
   ctx.on('agent/turn-stopping', ({ agent, turn }: any) => {
     if (agent) delete (agent as any).__agRecoverySynthetic
     const sid = String(agent?.id ?? agent?.session?.id ?? '')
-    if (sid) sessionAgents.delete(sid)
+    if (sid) {
+      sessionAgents.delete(sid)
+    }
     const state = states.get(agent)
     if (state?.turn === turn) states.delete(agent)
   })
@@ -993,7 +1041,10 @@ export function apply(ctx: Context, config: Config) {
   ctx.on('agent/disposed', ({ agent }: any) => {
     if (agent) delete (agent as any).__agRecoverySynthetic
     const sid = String(agent?.id ?? agent?.session?.id ?? '')
-    if (sid) sessionAgents.delete(sid)
+    if (sid) {
+      sessionAgents.delete(sid)
+      consecutiveSyntheticCounts.delete(sid)
+    }
     states.delete(agent)
   })
 }

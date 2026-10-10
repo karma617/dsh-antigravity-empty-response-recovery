@@ -15,5 +15,8 @@
         enableToolChoiceNone: true
         syntheticFallback: true
         syntheticResponse: '已自动捕获并恢复前序空响应。当前任务上下文已完整保留，请继续下一步操作。'
+        autoContinueOnSynthetic: true
+        autoContinuePrompt: '上一个操作已执行完毕，任务未结束。请根据已知执行结果与上下文，继续执行下一步任务或输出最终分析结论。'
+        autoContinueMaxConsecutive: 3
         logFilePath: ''
         logLevel: info

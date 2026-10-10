@@ -29,6 +29,9 @@ export interface Config {
     postCompactionRetry: number;
     syntheticFallback: boolean;
     syntheticResponse: string;
+    autoContinueOnSynthetic: boolean;
+    autoContinuePrompt: string;
+    autoContinueMaxConsecutive: number;
     targetModels: string[];
     logFilePath?: string;
     logLevel: 'silent' | 'error' | 'warn' | 'info' | 'debug';
